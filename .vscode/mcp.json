@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "mt5-trading": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
