@@ -1,4 +1,6 @@
 .env
+.env.demo
+.env.live
 __pycache__/
 *.pyc
 *.pyo
@@ -11,4 +13,12 @@ build/
 venv/
 logs/
 *.log
+data/*
+!data/.gitkeep
+*.sqlite3
+*.db
+tmp_*.py
+tmp_*.txt
+*_order*.py
+*_trade*.log
 .DS_Store
