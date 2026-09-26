@@ -1,17 +1,15 @@
 """
-MCP-style server entrypoint.
+MCP server entrypoint.
 
-Attempts to use the `mcp` package if available. If not, falls back to a
-minimal JSON-RPC-over-stdio dispatcher that exposes the tool functions in
-`tools/`.
+Exposes the tool functions in `tools/` over the MCP stdio transport.
 
 The server injects `STRATEGY_SYSTEM_PROMPT` from `strategy_config` into
 server context and logs every tool call to `logs/server.log`.
 """
 
 import sys
-import json
 import logging
+from functools import wraps
 from typing import Any
 import numpy as np
 import pandas as pd
@@ -87,29 +85,12 @@ def _json_safe(value: Any):
     return value
 
 
-def handle_call(method: str, params: Any):
-    func = TOOL_MAP.get(method)
-    logger.info(f"Tool call: {method} params={params}")
-    if method == 'get_system_prompt':
-        return {'system_prompt': STRATEGY_SYSTEM_PROMPT}
-    if method == 'get_server_status':
-        return get_server_status()
-    if method in {'initialize', 'notifications/initialized'}:
-        return {'status': 'ok', 'server': 'mt5-trading'}
-    if not func:
-        return {'error': f'Method {method} not found'}
-    try:
-        if isinstance(params, dict):
-            return func(**params)
-        elif isinstance(params, list):
-            return func(*params)
-        elif params is None:
-            return func()
-        else:
-            return func(params)
-    except Exception as e:
-        logger.exception(f"Error in tool {method}")
-        return {'error': str(e)}
+def _json_safe_tool(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        return _json_safe(func(*args, **kwargs))
+
+    return wrapped
 
 
 def get_server_status() -> dict:
@@ -122,46 +103,33 @@ def get_server_status() -> dict:
     }
 
 
-def run_stdio_dispatcher():
-    logger.info("Starting stdio JSON-RPC dispatcher (fallback)")
-    # Simple loop: one JSON object per stdin line
-    for raw in sys.stdin:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            req = json.loads(raw)
-            req_id = req.get('id')
-            method = req.get('method')
-            params = req.get('params')
-            result = handle_call(method, params)
-            resp = {'id': req_id, 'result': _json_safe(result)}
-        except Exception as e:
-            logger.exception("Error handling request")
-            resp = {'id': None, 'error': str(e)}
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+def get_system_prompt() -> dict:
+    return {'system_prompt': STRATEGY_SYSTEM_PROMPT}
 
 
-def main():
-    # Try to use `mcp` package if present
+def main() -> int:
     try:
-        import mcp
-        # Try to create an MCP server if the package exposes a simple API
-        try:
-            server = getattr(mcp, 'Server', None) or getattr(mcp, 'MCPServer', None)
-            if server:
-                s = server(tools=TOOL_MAP, system_prompt=STRATEGY_SYSTEM_PROMPT)
-                logger.info("mcp server initialized")
-                s.serve()
-                return
-        except Exception:
-            logger.warning('mcp package present but failed to initialize server; falling back')
+        from mcp.server.fastmcp import FastMCP
     except Exception:
-        logger.info('mcp package not installed; using stdio dispatcher')
+        logger.exception(
+            "MCP SDK is required to run this server. "
+            "Install the project dependencies from requirements.txt."
+        )
+        return 1
 
-    run_stdio_dispatcher()
+    server = FastMCP(
+        "mt5-trading",
+        instructions=STRATEGY_SYSTEM_PROMPT,
+    )
+    for name, func in TOOL_MAP.items():
+        server.tool(name=name)(_json_safe_tool(func))
+    server.tool(name='get_system_prompt')(get_system_prompt)
+    server.tool(name='get_server_status')(get_server_status)
+
+    logger.info("Starting MCP server over stdio")
+    server.run(transport='stdio')
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

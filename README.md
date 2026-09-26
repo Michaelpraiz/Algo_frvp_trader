@@ -41,6 +41,10 @@ The server entry point is:
 mt5_mcp.server
 ```
 
+The server requires the MCP SDK installed from `requirements.txt` and exits
+with an error if the SDK cannot be loaded; it does not provide a non-MCP
+stdio fallback.
+
 ## Layout
 
 ```text
