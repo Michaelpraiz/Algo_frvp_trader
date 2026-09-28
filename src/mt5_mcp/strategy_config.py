@@ -502,17 +502,6 @@ RISK_MANAGEMENT = {
     "min_single_trade_lots": 0.01,
     "max_trades_per_day": 10,           # Hard daily trade limit
 
-    # === CONSECUTIVE LOSS TRACKING & CIRCUIT BREAKER ===
-    "consecutive_loss_tracking": {
-        "enabled": True,
-        "consecutive_losses_threshold": 2,
-        "action_on_threshold": "stop_trading_for_rest_of_day",
-        "reduction_action": {
-            "reduce_risk_to_percent": 3.0,
-            "apply_for_next_n_trades": 0,
-        },
-    },
-    
     # === STOP LOSS ===
     "stop_loss": {
         "placement": "swing_point_based",  # Place SL beyond recent swing extreme
@@ -573,16 +562,16 @@ RISK_MANAGEMENT = {
 
         "logic_flow": [
             "1. Identify the next valid order block on the same sniper-entry timeframe (M15/M5/M1)",
-            "2. Select a valid structural target between 1:1 and 1:10 R:R from the swing-point SL",
+            "2. Select a valid structural target between 1:1 and 1:29.44 R:R from the swing-point SL",
             "3. Retarget upward/downward if the target OB becomes active→breaker or breaker→removed while the trade is open",
         ],
 
         "rr_guardrails": {
             "minimum_rr": 1.0,
-            "maximum_rr": 10.0,
+            "maximum_rr": 29.44,
 
             "decision_logic": [
-                "Accept targets only when R:R is between 1:1 and 1:10 inclusive",
+                "Accept targets only when R:R is between 1:1 and 1:29.44 inclusive",
                 "Keep the structural stop; size the position so planned loss does not exceed 3% of balance",
                 "If no valid structural target falls within the permitted R:R range: SKIP TRADE",
                 "IF target OB flips active→breaker: cascade to the next valid OB on that same TF",
@@ -604,7 +593,7 @@ RISK_MANAGEMENT = {
 FILTERS = {
     # === RISK GUARDRAILS ===
     "min_rr_to_take_trade": 1.0,
-    "max_rr_to_take_trade": 10.0,
+    "max_rr_to_take_trade": 29.44,
     "maximum_slippage_points": 20,
     "maximum_spread_points": {"GOLD#": 30},
     "default_spread_points": {"GOLD#": 24},
@@ -697,14 +686,6 @@ POSITION_MANAGEMENT = {
         },
     },
 
-    "consecutive_loss_rules": {
-        "after_2_consecutive_losses": {
-            "action_1": "Stop trading for the rest of the day",
-            "action_2_alternative": "No reduction-of-risk schedule is used; each entry remains capped at 3%",
-            "example": "Normal: up to 3% risk per entry. After 2 losses: no further trades until the next day",
-            "duration": "Apply for the remainder of the current trading day",
-        },
-    },
 }
 
 # =============================================================================
@@ -736,19 +717,12 @@ TRADE_HISTORY = {
     
     "analytics_calculated": {
         "consecutive_wins": "Current streak of winning trades",
-        "consecutive_losses": "Current streak of losing trades (triggers the daily trading halt)",
+        "consecutive_losses": "Current losing-trade streak for reporting only; does not halt trading",
         "total_trades_today": "Number of trades in current day",
         "daily_pnl": "Cumulative P&L for the day",
         "daily_win_rate": "% of winning trades today",
         "account_balance_current": "Live account balance after each trade",
         "remaining_daily_risk": "Max additional risk available for day",
-    },
-    
-    "position_reduction_trigger": {
-        "event": "2 consecutive losses detected",
-        "action": "Reduce position size by 50% for next trade (or sit out 1 hour)",
-        "stored_as": "consecutive_losses_counter",
-        "reset_when": "1 winning trade OR at start of new day",
     },
     
     "storage_format": "CSV file in logs/ directory, time-stamped",
@@ -783,7 +757,7 @@ ANALYSIS FLOW (TOP-DOWN):
 3. Only enter on {TIMEFRAMES['entry']} if the level has passed the 5-candle confirmation rule
 4. Use {TIMEFRAMES['confirm']} for execution confirmation and quick validation
 
-CRITICAL RULE: Never move a structural stop to manufacture a target ratio. Cap planned loss at 3% by sizing; accept only structural targets from 1:1 through 1:10 R:R; stop new entries at 10% daily loss.
+CRITICAL RULE: Never move a structural stop to manufacture a target ratio. Cap planned loss at 3% by sizing; accept only structural targets from 1:1 through 1:29.44 net R:R; stop new entries at 10% daily loss. Consecutive losses do not halt trading.
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 2: MARKET STRUCTURE CONCEPTS (SMC Standard)
@@ -1003,7 +977,7 @@ ACCOUNT RISK LIMITS:
 ├─ Risk per trade: 3.0% maximum ($300 on $10k account)
 ├─ Max concurrent positions: 2
 ├─ Combined open risk (both positions): 6.0% maximum
-├─ Max daily realized loss: 10.0% of UTC day-start balance (stop trading if hit)
+├─ Max daily loss: 10.0% of UTC day-start balance (stop new entries if hit)
 ├─ Max trades per day: 10 hard limit
 └─ Consecutive loss tracking: ENABLED
 
@@ -1031,9 +1005,9 @@ POSITION MANAGEMENT:
 └─ No Sequential Scaling: Reject scaled-in entries
 
 CONSECUTIVE LOSS TRACKING:
-├─ Trigger: 2 consecutive losses detected
-├─ Action: Stop new entries for the rest of the UTC trading day
-├─ Daily loss cap: Stop new entries at 10% realized loss from day-start balance
+├─ Consecutive loss halts: Disabled; streaks are tracked for reporting only
+├─ Per-trade loss cap: 3% of current balance, sized from the structural stop
+├─ Daily loss cap: Stop new entries at 10% loss from UTC day-start balance
 └─ Risk per entry never exceeds 3%
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -1044,12 +1018,12 @@ TP STRATEGY: Identify next swing high/low on entry timeframe, validate R:R
 
 R:R GUARDRAILS:
 ├─ Minimum R:R: 1.0 (1:1)
-├─ Maximum R:R: 10.0 (1:10)
+├─ Maximum R:R: 29.44
 │
 ├─ Decision Logic:
 │  ├─ IF structural target offers < 1:1 R:R → SKIP or evaluate the next structural target
-│  ├─ IF target offers 1:1 to 1:10 R:R → SET TP AT THAT STRUCTURAL LEVEL
-│  └─ IF no structural target offers up to 1:10 R:R → SKIP; never distort the stop
+│  ├─ IF target offers 1:1 to 1:29.44 R:R → SET TP AT THAT STRUCTURAL LEVEL
+│  └─ IF no structural target offers up to 1:29.44 R:R → SKIP; never distort the stop
 │
 └─ Calculation: R:R = (Target - Entry) / (Entry - SL)
 
@@ -1123,12 +1097,12 @@ COMPREHENSIVE TRADE LOGGING:
 └─ Storage: CSV file in logs/ directory (trade_history_YYYY-MM-DD.csv)
 
 ANALYTICS CALCULATED:
-├─ Consecutive wins/losses (triggers position reduction at 2 losses)
+├─ Consecutive wins/losses (tracked for reporting only; no trading halt)
 ├─ Daily P&L & win rate
 ├─ Total trades today
 ├─ Account balance after each trade
 ├─ Remaining daily risk budget
-└─ Purpose: Monitor performance & enforce risk rules
+└─ Purpose: Monitor performance; enforce only per-trade and daily loss limits
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 12: KEY TRADING RULES (DO's & DON'Ts)
@@ -1140,16 +1114,16 @@ SECTION 12: KEY TRADING RULES (DO's & DON'Ts)
   ✓ Require liquidity sweep confirmation for BOS
   ✓ Validate FVGs on 4x lower timeframe before entry
   ✓ Identify institutional levels (OB, FVG, PDH/PDL, swings)
-  ✓ Check R:R between 1:1 and 1:10
+  ✓ Check R:R between 1:1 and 1:29.44
   ✓ Place SL at logical structural level (swing extreme or OB)
   ✓ Cap each trade's modeled loss at 3% and total open risk at 6%
-  ✓ Stop new entries at 10% UTC daily loss or after 2 consecutive losses
+  ✓ Stop new entries at 10% UTC daily loss
   ✓ Document all trades for analytics & learning
 
 ✗ NEVER DO:
   ✗ Enter counter to {TIMEFRAMES['bias']} bias
   ✗ Place SL in middle of structure (between levels)
-  ✗ Take a structural target beyond 1:10 R:R
+  ✗ Take a structural target beyond 1:29.44 R:R
   ✗ Trade first 15 min of major session opens
   ✗ Take trade with R:R < 1:1
   ✗ Scale in sequentially (both positions together only)

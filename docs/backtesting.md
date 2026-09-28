@@ -38,12 +38,14 @@ out-of-sample results. Its training rank is expectancy in R less a drawdown pena
 - Stops use the most recent causally confirmed opposing swing with a configurable buffer.
   Targets use the nearest already-confirmed opposing swing. Trades without a confirmed
   target or below the configured minimum R:R are skipped and logged.
-- Risk is a fixed percentage of the evolving balance, capped at 3% per trade and 10 lots.
-  Volume is rounded down to the broker step; entries are rejected if minimum volume,
-  margin, or modeled costs would breach the risk cap. The configured maximum daily loss
-  (measured against UTC day-start balance), two-consecutive-loss circuit breaker, and
-  post-stop cooldown are applied. If both stop and target are inside one bar, the stop is
-  assumed to have occurred first.
+- Risk is a fixed percentage of the evolving balance, capped at 3% per trade, 10 lots,
+  and the remaining 10% UTC daily-loss budget. Volume is rounded down to the broker step;
+  entries are rejected if minimum volume, margin, or modeled costs would breach a risk
+  limit. There is no consecutive-loss halt; streaks are reporting data only. The
+  post-stop cooldown remains in effect. If both stop and target are inside one bar, the
+  stop is assumed to have occurred first.
+- R:R is checked after modeled spread, slippage, and commission. The maximum is 29.44:1,
+  covering the highest net R:R among the 11 setups rejected by the prior four-month run.
 - MT5-loaded bars use their historical spread points. Missing spreads use the configured
   instrument fallback (GOLD#: 24 points); the default slippage is one point per fill,
   an explicit proxy because OHLC bars cannot reveal actual execution slippage. Commission

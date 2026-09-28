@@ -69,8 +69,14 @@ class BacktestParameters:
             value = getattr(result, name)
             if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
                 raise ValueError(f"{name} must be a finite number")
-        if not 1 <= result.minimum_rr <= 10 or not 1 <= result.maximum_rr <= 10:
-            raise ValueError("R:R bounds must be between 1:1 and 1:10")
+        maximum_configured_rr = float(FILTERS["max_rr_to_take_trade"])
+        if (result.minimum_rr < 1
+                or result.minimum_rr > maximum_configured_rr
+                or result.maximum_rr < 1
+                or result.maximum_rr > maximum_configured_rr):
+            raise ValueError(
+                f"R:R bounds must be between 1:1 and 1:{maximum_configured_rr:g}"
+            )
         if result.minimum_rr > result.maximum_rr:
             raise ValueError("minimum_rr cannot exceed maximum_rr")
         if not 0 < result.risk_percent <= float(RISK_MANAGEMENT["max_single_trade_risk_percent"]):
@@ -586,7 +592,6 @@ def run_backtest(
     trades: list[dict[str, Any]] = []
     order_blocks: list[dict[str, Any]] = []
     open_trade: dict[str, Any] | None = None
-    consecutive_losses = 0
     current_day: str | None = None
     day_start_balance = balance
     daily_halted = False
@@ -600,7 +605,6 @@ def run_backtest(
             current_day = day
             day_start_balance = balance
             daily_halted = False
-            consecutive_losses = 0
         spread_points = (
             float(row.spread_points)
             if pd.notna(row.spread_points)
@@ -644,14 +648,7 @@ def run_backtest(
                 ) / day_start_balance * 100 >= daily_risk_limit:
                     daily_halted = True
                 if pnl < 0:
-                    consecutive_losses += 1
-                    if consecutive_losses >= int(
-                        RISK_MANAGEMENT["consecutive_loss_tracking"]["consecutive_losses_threshold"]
-                    ):
-                        daily_halted = True
                     cooldown_until = index + int(FILTERS["post_stop_loss_cooldown"]["cooldown_candles"]) + 1
-                else:
-                    consecutive_losses = 0
 
         if open_trade is None and index >= max(2 * params.swing_lookback, params.frvp_lookback_period + 1):
             if (index >= cooldown_until
@@ -703,7 +700,13 @@ def run_backtest(
                     entry_commission = params.commission_per_lot_per_side
                     exit_commission = params.commission_per_lot_per_side
                     loss_per_lot += entry_commission + exit_commission
-                    risk_budget = balance * params.risk_percent / 100.0
+                    daily_loss_budget = day_start_balance * daily_risk_limit / 100.0
+                    daily_pnl = balance - day_start_balance
+                    daily_risk_remaining = max(0.0, daily_loss_budget + daily_pnl)
+                    risk_budget = min(
+                        balance * params.risk_percent / 100.0,
+                        daily_risk_remaining,
+                    )
                     raw_volume = min(
                         risk_budget / loss_per_lot if loss_per_lot > 0 else 0.0,
                         params.maximum_volume,
@@ -744,6 +747,8 @@ def run_backtest(
                         "features": candidate["features"], **plan,
                     }
                     rejection = plan.get("rejection_reason")
+                    if rejection in {"below_minimum_rr", "above_maximum_rr"}:
+                        rejection = None
                     if rejection:
                         pass
                     elif plan["risk_distance"] <= 0:
@@ -841,7 +846,7 @@ def run_backtest(
             "entry": "H4 HH/HL or LH/LL bias; confirmed structure+sweep, OB retest, or rolling FRVP engulfing retest",
             "stop": "Most recent causally confirmed opposing swing with configurable point buffer",
             "target": "Nearest causally confirmed opposing swing; trades without a target or minimum R:R are rejected",
-            "risk": "Fixed percentage of current balance; daily drawdown cap and two-loss consecutive circuit breaker stop entries",
+            "risk": "Each trade is sized to the 3% per-trade cap and remaining 10% UTC daily-loss budget; no consecutive-loss halt",
             "daily_limit": f"Stop new entries after realized daily drawdown reaches {daily_risk_limit:g}% of UTC day-start balance",
             "intrabar_tie": "If stop and target both touch in one bar, stop is assumed first",
             "frvp_volume": "MT5 tick volume proxy distributed across OHLC price range",

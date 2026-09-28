@@ -14,8 +14,8 @@
 2. Read the current `strategy_config.py` and every module in this project that implements or references: market structure detection, order block detection, volume profile / FRVP, entry logic, stop-loss/take-profit logic, lot sizing, risk management, or timeframe configuration.
 3. Search the whole codebase (not just strategy_config.py) for anything tied to the old logic, including but not limited to:
    - Old timeframe roles (D1 bias / H4 structure / H1-M15 entry) — should become 4H bias / 1H-30min setup / 15min-5min-1min sniper entry
-   - Old risk % values or the loss-streak reduction schedule — should become flat 10% risk with a 2-consecutive-loss daily circuit breaker
-   - Any TP logic not yet aligned to: TP = next valid OB on the *same* entry-zone timeframe, 1:3 minimum R:R as a hard skip-filter (never shrink SL to force it), cascading retarget on OB breaker, breakeven-and-hold on OB removal
+   - Outdated per-trade risk or loss-streak rules — current policy is at most 3% risk per trade, a 10% UTC daily loss limit, and no consecutive-loss halt
+   - Any TP logic not yet aligned to: TP = next valid OB on the *same* entry-zone timeframe, 1:1–1:29.44 net R:R bounds (never shrink SL to force a ratio), cascading retarget on OB breaker, breakeven-and-hold on OB removal
    - Any SL logic not yet aligned to: nearest valid swing point to the order block
    - Missing or incomplete implementations of: the market structure BOS/CHoCH state machine, the full order block pipeline (swing detection → trigger → anchor selection → ATR filter → invalidation lifecycle → combine → display cap, returning both `all_tracked_obs` and `visible_obs`), and the FRVP anchoring + 5-candle retest scenario engine (POC/VAL/VAH, with POC validated first per the master strategy's priority rule)
 4. Produce a structured report: for each affected file, list what's missing, what's wrong/outdated, and what needs to be added — no code changes yet.

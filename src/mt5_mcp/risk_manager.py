@@ -9,7 +9,7 @@ Enforces all risk rules from strategy_config.py:
 - Spread validation
 - R:R guardrails
 - News event filtering
-- Consecutive loss tracking
+- Trade outcome statistics
 """
 
 import logging
@@ -124,14 +124,10 @@ class RiskManager:
 
         # R:R guardrails
         self.min_rr = self.filters.get("min_rr_to_take_trade", 1.0)
-        self.max_rr = self.filters.get("max_rr_to_take_trade", 10.0)
+        self.max_rr = self.filters.get("max_rr_to_take_trade", 29.44)
 
-        # Consecutive loss tracking
-        self.consecutive_loss_config = self.risk_config.get("consecutive_loss_tracking", {})
+        # Loss streaks are retained for reporting only; they do not gate trading.
         self.consecutive_losses = 0
-        self.loss_reduction_active = False
-        self.loss_reduction_trades_remaining = 0
-        self.reduced_risk_percent = self.risk_per_trade
         
         # Daily statistics
         self.daily_stats = DailyStats()
@@ -583,12 +579,7 @@ class RiskManager:
             day_start_balance = balance - realized_today
             daily_pnl_percent = (daily_pnl / day_start_balance * 100) if day_start_balance > 0 else 0
 
-            threshold = int(self.consecutive_loss_config.get("consecutive_losses_threshold", 2))
-            consecutive_halt = (
-                self.daily_stats.date == today.isoformat()
-                and self.daily_stats.consecutive_losses >= threshold
-            )
-            can_trade = daily_pnl_percent > -self.max_daily_risk and not consecutive_halt
+            can_trade = daily_pnl_percent > -self.max_daily_risk
             
             # Update daily stats
             self.daily_stats.date = today.isoformat()
@@ -612,12 +603,10 @@ class RiskManager:
                 "daily_pnl_percent": round(daily_pnl_percent, 2),
                 "max_daily_risk": self.max_daily_risk,
                 "can_trade": can_trade,
-                "consecutive_loss_halt": consecutive_halt,
+                "consecutive_loss_halt": False,
                 "day_start_balance": round(day_start_balance, 2),
                 "message": (
                     "Daily limit OK" if can_trade
-                    else "Two consecutive losses: trading halted until next UTC day"
-                    if consecutive_halt
                     else f"Daily loss limit hit: {abs(daily_pnl_percent):.2f}% vs {self.max_daily_risk}%"
                 )
             }
@@ -687,8 +676,7 @@ class RiskManager:
     
     def record_trade_outcome(self, pnl: float, side: str = "long") -> Dict[str, Any]:
         """
-        Record trade outcome and update consecutive loss counter.
-        Triggers position reduction if consecutive losses threshold is hit.
+        Record trade outcome and track the current loss streak for reporting only.
         
         Args:
             pnl: Profit/loss in USD
@@ -697,7 +685,7 @@ class RiskManager:
         Returns:
             dict: {
                 'consecutive_losses': int,
-                'loss_reduction_active': bool,
+                'loss_reduction_active': False,
                 'reduced_risk_percent': float,
                 'message': str
             }
@@ -707,8 +695,6 @@ class RiskManager:
             if self.daily_stats.date != today:
                 self.daily_stats = DailyStats(date=today)
                 self.consecutive_losses = 0
-                self.loss_reduction_active = False
-                self.loss_reduction_trades_remaining = 0
             if pnl < 0:
                 self.consecutive_losses += 1
                 self.daily_stats.consecutive_wins = 0
@@ -718,46 +704,26 @@ class RiskManager:
                 logger.warning(f"Loss recorded: {pnl:+.2f} USD | Consecutive losses: {self.consecutive_losses}")
             else:
                 self.consecutive_losses = 0
-                self.loss_reduction_active = False
-                self.loss_reduction_trades_remaining = 0
                 self.daily_stats.consecutive_wins += 1
                 self.daily_stats.consecutive_losses = 0
                 self.daily_stats.largest_win = max(self.daily_stats.largest_win, pnl)
                 
                 logger.info(f"Win recorded: {pnl:+.2f} USD | Consecutive wins: {self.daily_stats.consecutive_wins}")
             
-            # Check for loss threshold
-            threshold = self.consecutive_loss_config.get("consecutive_losses_threshold", 2)
-            if self.consecutive_losses >= threshold and not self.loss_reduction_active:
-                self.loss_reduction_active = True
-                self.loss_reduction_trades_remaining = 0
-                
-                logger.error(
-                    f"[WARNING] CONSECUTIVE LOSS THRESHOLD HIT ({self.consecutive_losses} losses)"
-                    "\n    New entries are halted until the next UTC day"
-                )
-                
-                return {
-                    "consecutive_losses": self.consecutive_losses,
-                    "loss_reduction_active": True,
-                    "reduced_risk_percent": self.risk_per_trade,
-                    "trading_halted": True,
-                    "message": "Trading halted until the next UTC day"
-                }
-            
             return {
                 "consecutive_losses": self.consecutive_losses,
-                "loss_reduction_active": self.loss_reduction_active,
-                "trading_halted": self.loss_reduction_active,
+                "loss_reduction_active": False,
+                "trading_halted": False,
                 "reduced_risk_percent": self.risk_per_trade,
-                "message": "Trade recorded"
+                "message": "Trade recorded; loss streak does not halt trading"
             }
         
         except Exception as e:
             logger.error(f"record_trade_outcome() error: {str(e)}", exc_info=True)
             return {
                 "consecutive_losses": self.consecutive_losses,
-                "loss_reduction_active": self.loss_reduction_active,
+                "loss_reduction_active": False,
+                "trading_halted": False,
                 "message": f"Error: {str(e)}"
             }
     

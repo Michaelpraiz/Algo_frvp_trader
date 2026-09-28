@@ -73,6 +73,7 @@ def test_backtest_uses_conservative_same_bar_exit_and_persists_label(monkeypatch
         lambda candles, index, candidate, pivots, params, point_size: {
             "entry_price": float(candles.iloc[index].close), "stop_loss": 99.0,
             "take_profit": 103.0, "risk_distance": 1.0, "rr_ratio": 3.0,
+            "rejection_reason": "above_maximum_rr",
         },
     )
     result = backtesting.run_backtest(
@@ -93,7 +94,7 @@ def test_backtest_uses_conservative_same_bar_exit_and_persists_label(monkeypatch
     assert bundle["trades"][0]["exit_reason"] == "stop_loss"
 
 
-def test_ten_percent_daily_loss_cap_blocks_another_entry(monkeypatch):
+def test_consecutive_losses_do_not_halt_but_daily_loss_cap_does(monkeypatch):
     data = candle_frame(60)
     entry_index = 21
     data.loc[entry_index + 1:, "low"] = 98.0
@@ -116,9 +117,18 @@ def test_ten_percent_daily_loss_cap_blocks_another_entry(monkeypatch):
     result = backtesting.run_backtest(
         data, "GOLD#", parameters={"frvp_lookback_period": 10, "tick_size": 0.01}
     )
-    assert result["metrics"]["trade_count"] == 1
-    assert result["trades"][0]["outcome"] == "loss"
-    assert result["metrics"]["total_pnl"] == pytest.approx(-1_000)
+    assert result["metrics"]["trade_count"] >= 3
+    assert all(trade["outcome"] == "loss" for trade in result["trades"])
+    assert sum(trade["pnl"] for trade in result["trades"]) >= -1_000
+    assert all(trade["risk_amount"] <= trade["risk_budget"] + 0.01
+               for trade in result["trades"])
+
+
+def test_backtest_accepts_configured_maximum_rr_and_rejects_higher_value():
+    params = backtesting.BacktestParameters.from_mapping({"maximum_rr": 29.44})
+    assert params.maximum_rr == 29.44
+    with pytest.raises(ValueError, match="29.44"):
+        backtesting.BacktestParameters.from_mapping({"maximum_rr": 29.45})
 
 
 def test_walk_forward_creates_pending_proposal_and_explicit_approval(tmp_path):

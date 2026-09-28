@@ -137,7 +137,7 @@ Source logic: Flux Charts' "Volumized Order Blocks" (Pine Script), `useBody = fa
    - Wait for the 5-candle rule to confirm whether the level holds.
    - **If it holds**, enter toward the next valid OB **on the same sniper-entry-zone timeframe** (15min/5min/1min) — not the setup zone:
      - Base case: TP = next valid OB on the entry-zone TF.
-     - Hard filter: if that OB doesn't clear 1:3 minimum R:R from the swing-point SL, check the next OB further out on the same TF. If nothing clears 1:3, skip the trade — never shrink the SL to force the ratio.
+     - Hard filter: accept net R:R from 1:1 through 1:29.44, checking structural targets on the same TF. If no target clears 1:1, skip the trade — never shrink the SL to force the ratio.
      - If the TP-target OB flips active→breaker mid-trade: auto-retarget TP to the next valid OB on that TF (cascade forward), no action on the open position.
      - If the TP-target OB goes breaker→removed mid-trade: move SL to breakeven, let it ride to the new target rather than closing at market.
      - A+ case: the entry-zone OB also sits inside a setup-zone (1H/30min) OB.
@@ -148,7 +148,9 @@ Source logic: Flux Charts' "Volumized Order Blocks" (Pine Script), `useBody = fa
    - SL at the nearest valid swing point to the order block.
    - Lot size derived from SL distance to fit the 10% cap.
    - Lot size scales up as the account grows (per $100 gained), always capped at 10% of the *current* balance — never a fixed dollar figure.
-   - **Circuit breaker:** stop trading for the rest of the day after 2 consecutive losses.
+   - Consecutive-loss halts are disabled; losing streaks may be tracked for reporting only.
+   - Stop new entries when the 10% UTC daily loss limit is reached; each trade remains
+     capped at 3% risk, including the remaining daily-loss budget.
 
 ---
 
@@ -156,6 +158,6 @@ Source logic: Flux Charts' "Volumized Order Blocks" (Pine Script), `useBody = fa
 
 - [ ] Port structure detection, OB pipeline, and FRVP scenario engine into a single production module set for `strategy_config.py`
 - [ ] Tune fractal `N` and `swingLength` per timeframe against real historical data
-- [ ] Backtest the flat 10% risk assumption against realistic SMC win-rate expectations
-- [ ] Validate 1:3 R:R hit-rate from entry-zone-TF OBs specifically (Section 5, step 5) before relying on it as a hard filter
+- [ ] Validate the 3% per-trade and 10% daily risk limits against realistic SMC win-rate expectations
+- [ ] Validate the 1:1–1:29.44 net R:R range from entry-zone-TF order blocks on out-of-sample data
 - [ ] Decide `obEndMethod` ("Wick" vs "Close") for production

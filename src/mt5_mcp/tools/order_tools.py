@@ -140,6 +140,19 @@ def _validate_broker_order(
             "success": False,
             "error": f"projected loss ${projected_loss:.2f} exceeds 3% risk cap ${risk_cap:.2f}",
         }
+    day_start_balance = float(daily["day_start_balance"])
+    daily_loss_budget = (
+        day_start_balance * float(RISK_MANAGEMENT["max_daily_risk_percent"]) / 100
+    )
+    daily_risk_remaining = max(0.0, daily_loss_budget + float(daily["daily_pnl"]))
+    if projected_loss > daily_risk_remaining + 0.01:
+        return {
+            "success": False,
+            "error": (
+                f"projected loss ${projected_loss:.2f} exceeds remaining daily loss "
+                f"budget ${daily_risk_remaining:.2f}"
+            ),
+        }
 
     margin = mt5.order_calc_margin(trade_type, symbol, volume, entry_price)
     if margin is None:
