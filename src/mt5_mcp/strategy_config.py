@@ -493,10 +493,13 @@ ENTRY_RULES = {
 
 RISK_MANAGEMENT = {
     # === ACCOUNT RISK LIMITS ===
-    "risk_per_trade_percent": 10.0,     # Flat 10% risk per entry, per the master strategy
-    "max_daily_risk_percent": 10.0,     # Daily circuit breaker: stop trading after 2 consecutive losses
+    "risk_per_trade_percent": 3.0,      # Hard maximum loss budget per trade
+    "max_single_trade_risk_percent": 3.0,
+    "max_daily_risk_percent": 10.0,     # Stop entries when UTC daily loss reaches 10%
     "max_open_trades": 2,               # Maximum 2 concurrent positions
-    "total_risk_per_max_open_trades": 10.0, # Combined risk of all open trades must not exceed 10% of account
+    "total_risk_per_max_open_trades": 6.0, # Two concurrent positions may risk at most 3% each
+    "max_single_trade_lots": 10.0,
+    "min_single_trade_lots": 0.01,
     "max_trades_per_day": 10,           # Hard daily trade limit
 
     # === CONSECUTIVE LOSS TRACKING & CIRCUIT BREAKER ===
@@ -505,7 +508,7 @@ RISK_MANAGEMENT = {
         "consecutive_losses_threshold": 2,
         "action_on_threshold": "stop_trading_for_rest_of_day",
         "reduction_action": {
-            "reduce_risk_to_percent": 10.0,
+            "reduce_risk_to_percent": 3.0,
             "apply_for_next_n_trades": 0,
         },
     },
@@ -539,28 +542,28 @@ RISK_MANAGEMENT = {
     "lot_sizing": {
         "method": "formula_based",
         
-        "formula_description": "Lot Size = Risk Amount / (SL Pips × Pip Value per Lot)",
+        "formula_description": "Lot Size = Risk budget / broker-calculated loss per lot at the structural stop",
         
         "calculation_steps": {
-            "step_1": "Risk Amount = Account Size × Risk % (e.g., $10,000 × 10% = $1,000)",
-            "step_2": "SL Pips = Distance from entry to stop loss (e.g., 20 pips)",
-            "step_3": "Pip Value = $10 per pip for 1 standard lot in forex (e.g., EURUSD 1 lot)",
-            "step_4": "Lot Size = Risk Amount / (SL Pips × Pip Value per Lot)",
+            "step_1": "Risk budget = account balance × up to 3%",
+            "step_2": "Use broker-calculated one-lot loss at the structural stop plus slippage allowance",
+            "step_3": "Floor the volume to the broker volume step and cap at 10 lots",
+            "step_4": "Reject if minimum volume exceeds the risk budget or available margin",
         },
         
         "example": {
             "account": "$10,000",
-            "risk_percent": "10%",
-            "risk_amount": "$1,000",
-            "sl_distance": "20 pips",
-            "Pip_value": "$10 per pip for 1 lot",
-            "result": "5.0 lots",
+            "risk_percent": "3% maximum",
+            "risk_amount": "no more than 3% of current account balance",
+            "sl_distance": "Use actual instrument stop distance",
+            "Pip_value": "Use broker tick-value and contract specifications",
+            "result": "Broker-sized position rounded down to its volume step and capped at 10 lots",
         },
         
         "multi_position_allocation": {
-            "rule": "When entering 2 positions together, split total risk equally across both",
-            "example": "Total $1,000 risk → Position 1: $500 (2.5 lots @ 20 pips), Position 2: $500 (2.5 lots @ 20 pips)",
-            "aggregate_limit": "Both positions combined must NOT exceed 10% account risk",
+            "rule": "When entering 2 positions together, each is capped at 3%; aggregate open risk is capped at 6%",
+            "example": "On a $10,000 balance, each position risks at most $300 and is sized against its own stop",
+            "aggregate_limit": "Both positions combined must NOT exceed 6% account risk",
         },
     },
     
@@ -570,17 +573,18 @@ RISK_MANAGEMENT = {
 
         "logic_flow": [
             "1. Identify the next valid order block on the same sniper-entry timeframe (M15/M5/M1)",
-            "2. Ensure the target clears a 1:3 minimum R:R from the swing-point SL",
+            "2. Select a valid structural target between 1:1 and 1:10 R:R from the swing-point SL",
             "3. Retarget upward/downward if the target OB becomes active→breaker or breaker→removed while the trade is open",
         ],
 
         "rr_guardrails": {
-            "minimum_rr": 3.0,  # Hard skip filter: never take the trade unless the target clears 1:3 R:R
-            "maximum_rr": 5.0,  # Soft ceiling when the next OB is obviously excessive
+            "minimum_rr": 1.0,
+            "maximum_rr": 10.0,
 
             "decision_logic": [
-                "IF target offers < 1:3 R:R (RR < 3.0): SKIP TRADE (do not shrink SL to force it)",
-                "IF target offers >= 1:3 R:R: use the next valid OB on the same entry-zone timeframe",
+                "Accept targets only when R:R is between 1:1 and 1:10 inclusive",
+                "Keep the structural stop; size the position so planned loss does not exceed 3% of balance",
+                "If no valid structural target falls within the permitted R:R range: SKIP TRADE",
                 "IF target OB flips active→breaker: cascade to the next valid OB on that same TF",
                 "IF target OB flips breaker→removed: move SL to breakeven and let the trade ride to the next valid target",
             ],
@@ -599,8 +603,13 @@ RISK_MANAGEMENT = {
 # =============================================================================
 FILTERS = {
     # === RISK GUARDRAILS ===
-    "min_rr_to_take_trade": 3.0,        # Hard skip filter: minimum 1:3 R:R on the selected entry-zone timeframe
-    "max_rr_to_take_trade": 5.0,        # Maximum 1:5 R:R (reasonable cap)
+    "min_rr_to_take_trade": 1.0,
+    "max_rr_to_take_trade": 10.0,
+    "maximum_slippage_points": 20,
+    "maximum_spread_points": {"GOLD#": 30},
+    "default_spread_points": {"GOLD#": 24},
+    "backtest_slippage_points_per_fill": 1.0,
+    "commission_per_lot_per_side": {"GOLD#": 0.0},
     
     # === SESSION FILTERING ===
     "avoid_session_opens_first_minutes": {
@@ -670,29 +679,29 @@ POSITION_MANAGEMENT = {
         ],
 
         "position_sizing_together": {
-            "total_risk_available": 10.0,
-            "split_across_positions": "Divide 10% risk equally across 2 positions",
+            "total_risk_available": 6.0,
+            "split_across_positions": "Each position is independently capped at 3%; combined open risk is capped at 6%",
             "example": {
                 "account": "$10,000",
-                "total_risk_budget": "$1,000 (10%)",
-                "position_1_risk": "$500 (5%)",
-                "position_2_risk": "$500 (5%)",
-                "if_sl_20_pips": "Position 1: 2.5 lots, Position 2: 2.5 lots = 5 lots total",
+                "total_risk_budget": "$600 (6%)",
+                "position_1_risk": "$300 (3%)",
+                "position_2_risk": "$300 (3%)",
+                "if_sl_20_pips": "Size each position independently using its actual stop distance and broker contract",
             },
         },
 
         "stop_loss_management": {
             "both_positions_share_sl": True,
             "sl_location": "Most recent swing extreme (swing high for shorts, swing low for longs)",
-            "aggregate_risk_check": "Combined SL of both positions must not exceed 10% account",
+            "aggregate_risk_check": "Combined open SL exposure must not exceed 6% account risk",
         },
     },
 
     "consecutive_loss_rules": {
         "after_2_consecutive_losses": {
             "action_1": "Stop trading for the rest of the day",
-            "action_2_alternative": "No reduction-of-risk schedule is used; the 10% flat risk rule stays in force",
-            "example": "Normal: 10% risk per entry. After 2 losses: no further trades until the next day",
+            "action_2_alternative": "No reduction-of-risk schedule is used; each entry remains capped at 3%",
+            "example": "Normal: up to 3% risk per entry. After 2 losses: no further trades until the next day",
             "duration": "Apply for the remainder of the current trading day",
         },
     },
@@ -727,7 +736,7 @@ TRADE_HISTORY = {
     
     "analytics_calculated": {
         "consecutive_wins": "Current streak of winning trades",
-        "consecutive_losses": "Current streak of losing trades (triggers position reduction)",
+        "consecutive_losses": "Current streak of losing trades (triggers the daily trading halt)",
         "total_trades_today": "Number of trades in current day",
         "daily_pnl": "Cumulative P&L for the day",
         "daily_win_rate": "% of winning trades today",
@@ -774,7 +783,7 @@ ANALYSIS FLOW (TOP-DOWN):
 3. Only enter on {TIMEFRAMES['entry']} if the level has passed the 5-candle confirmation rule
 4. Use {TIMEFRAMES['confirm']} for execution confirmation and quick validation
 
-CRITICAL RULE: NEVER force a trade when the level fails the 5-candle retest rule or the 1:3 R:R filter.
+CRITICAL RULE: Never move a structural stop to manufacture a target ratio. Cap planned loss at 3% by sizing; accept only structural targets from 1:1 through 1:10 R:R; stop new entries at 10% daily loss.
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 2: MARKET STRUCTURE CONCEPTS (SMC Standard)
@@ -991,10 +1000,10 @@ SECTION 8: RISK MANAGEMENT & POSITION SIZING
 ═══════════════════════════════════════════════════════════════════════════════
 
 ACCOUNT RISK LIMITS:
-├─ Risk per trade: 5.0% maximum ($500 on $10k account)
+├─ Risk per trade: 3.0% maximum ($300 on $10k account)
 ├─ Max concurrent positions: 2
-├─ Combined risk (both positions): 10.0% maximum
-├─ Max daily risk: 25.0% (stop trading if hit)
+├─ Combined open risk (both positions): 6.0% maximum
+├─ Max daily realized loss: 10.0% of UTC day-start balance (stop trading if hit)
 ├─ Max trades per day: 10 hard limit
 └─ Consecutive loss tracking: ENABLED
 
@@ -1002,21 +1011,17 @@ STOP LOSS PLACEMENT:
 ├─ Method: Swing-point based (at logical structural level)
 ├─ For LONGS: Just beyond most recent swing low (10-candle lookback)
 ├─ For SHORTS: Just beyond most recent swing high (10-candle lookback)
-├─ Range: 10-30 pips guided by instrument volatility
-│  ├─ Tight structures: 10-15 pips
-│  ├─ Volatile markets: 20-30 pips
-│  └─ NEVER place in middle of structure
-└─ Critical: SL must be at swing extreme or OB, never between levels
+├─ Keep the structural stop; do not tighten it to force R:R
+├─ If stop is invalid or inside broker minimum distance: reject the setup
+└─ Size the order so worst-case modeled loss, including execution allowance, is <= 3%
 
 LOT SIZING FORMULA:
-├─ Risk Amount = Account Size × Risk % (e.g., $10k × 5% = $500)
-├─ Lot Size = Risk Amount / (SL Pips × $10 per pip per lot)
-├─ Example: $500 / (20 pips × $10) = 2.5 lots
-├─ Multi-position split: Divide total risk EQUALLY across both positions
-│  ├─ Total risk: $1,000 (10% on $10k)
-│  ├─ Position 1: $500 = 2.5 lots @ 20 pips
-│  └─ Position 2: $500 = 2.5 lots @ 20 pips
-└─ AGGREGATE CHECK: Combined must NOT exceed 10%
+├─ Risk budget = min(requested risk, 3% of current balance)
+├─ Calculate loss per lot using the broker's tick value and actual stop distance
+├─ Floor volume to broker volume_step; never round up above the risk budget
+├─ Permitted volume: broker minimum through min(10 lots, broker maximum)
+├─ Reject if the minimum valid volume exceeds the 3% risk budget or free margin
+└─ Combined open risk for two positions must not exceed 6%
 
 POSITION MANAGEMENT:
 ├─ Entry Mechanics: BOTH positions entered TOGETHER, NOT sequentially
@@ -1027,10 +1032,9 @@ POSITION MANAGEMENT:
 
 CONSECUTIVE LOSS TRACKING:
 ├─ Trigger: 2 consecutive losses detected
-├─ Action: Reduce risk from 5% to 2.5% for next 3 trades
-├─ OR: Sit out 1 hour before next trade
-├─ Reset: After 1 winning trade OR new trading day
-└─ Purpose: Preserve capital during drawdown periods
+├─ Action: Stop new entries for the rest of the UTC trading day
+├─ Daily loss cap: Stop new entries at 10% realized loss from day-start balance
+└─ Risk per entry never exceeds 3%
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 9: TAKE PROFIT (R:R GUARDRAILS & STRUCTURE)
@@ -1039,13 +1043,13 @@ SECTION 9: TAKE PROFIT (R:R GUARDRAILS & STRUCTURE)
 TP STRATEGY: Identify next swing high/low on entry timeframe, validate R:R
 
 R:R GUARDRAILS:
-├─ Minimum R:R: 2.0 (1:2 — 1% risk for 2% reward)
-├─ Maximum R:R: 5.0 (1:5 — hard cap, never overreach)
+├─ Minimum R:R: 1.0 (1:1)
+├─ Maximum R:R: 10.0 (1:10)
 │
 ├─ Decision Logic:
-│  ├─ IF Target offers < 1:2 R:R → CANCEL TRADE (insufficient reward)
-│  ├─ IF Target offers 1:2 to 1:5 R:R → SET TP AT STRUCTURAL LEVEL
-│  └─ IF Target offers > 1:5 R:R → CAP TP AT 1:5 (don't overreach)
+│  ├─ IF structural target offers < 1:1 R:R → SKIP or evaluate the next structural target
+│  ├─ IF target offers 1:1 to 1:10 R:R → SET TP AT THAT STRUCTURAL LEVEL
+│  └─ IF no structural target offers up to 1:10 R:R → SKIP; never distort the stop
 │
 └─ Calculation: R:R = (Target - Entry) / (Entry - SL)
 
@@ -1093,7 +1097,7 @@ SPREAD LIMITS (Per instrument):
 ├─ GBPUSD, AUDUSD, USDJPY, USDCAD, USDCHF: 2.0 pips max
 ├─ NZDUSD: 2.5 pips max
 ├─ EURGBP, EURJPY, GBPJPY: 3.0 pips max
-├─ GOLD#: 30 pips max
+├─ GOLD#: 30 broker points max (0.30 price units at 0.01 point)
 └─ BTCUSD#: 50 pips max
 
 NEWS FILTERING:
@@ -1136,18 +1140,18 @@ SECTION 12: KEY TRADING RULES (DO's & DON'Ts)
   ✓ Require liquidity sweep confirmation for BOS
   ✓ Validate FVGs on 4x lower timeframe before entry
   ✓ Identify institutional levels (OB, FVG, PDH/PDL, swings)
-  ✓ Check R:R between 1:2 and 1:5 (min 1:2, max 1:5)
+  ✓ Check R:R between 1:1 and 1:10
   ✓ Place SL at logical structural level (swing extreme or OB)
-  ✓ Enter 2 positions TOGETHER with equal risk split
-  ✓ Track consecutive losses; reduce size after 2 losses
+  ✓ Cap each trade's modeled loss at 3% and total open risk at 6%
+  ✓ Stop new entries at 10% UTC daily loss or after 2 consecutive losses
   ✓ Document all trades for analytics & learning
 
 ✗ NEVER DO:
   ✗ Enter counter to {TIMEFRAMES['bias']} bias
   ✗ Place SL in middle of structure (between levels)
-  ✗ Overreach beyond 1:5 R:R
+  ✗ Take a structural target beyond 1:10 R:R
   ✗ Trade first 15 min of major session opens
-  ✗ Take trade with R:R < 1:2
+  ✗ Take trade with R:R < 1:1
   ✗ Scale in sequentially (both positions together only)
   ✗ Use BOS without liquidity sweep confirmation
   ✗ Ignore FVG invalidation levels

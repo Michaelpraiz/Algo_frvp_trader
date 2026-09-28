@@ -15,10 +15,12 @@ Enforces all risk rules from strategy_config.py:
 import logging
 import sys
 from typing import Dict, Optional, Tuple, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 import json
 import os
+import math
+import MetaTrader5 as mt5
 
 # Import local modules
 from .mt5_client import get_client
@@ -69,7 +71,7 @@ class TradeSetup:
 @dataclass
 class DailyStats:
     """Tracks daily trading statistics."""
-    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
+    date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     trades_today: int = 0
     daily_pnl: float = 0.0
     daily_pnl_percent: float = 0.0
@@ -114,22 +116,22 @@ class RiskManager:
         self.position_mgmt = POSITION_MANAGEMENT
         
         # Risk parameters
-        self.risk_per_trade = self.risk_config.get("risk_per_trade_percent", 10.0)
+        self.risk_per_trade = self.risk_config.get("risk_per_trade_percent", 3.0)
         self.max_daily_risk = self.risk_config.get("max_daily_risk_percent", 10.0)
         self.max_open_trades = self.risk_config.get("max_open_trades", 2)
-        self.total_risk_per_max_open = self.risk_config.get("total_risk_per_max_open_trades", 10.0)
+        self.total_risk_per_max_open = self.risk_config.get("total_risk_per_max_open_trades", 6.0)
         self.max_trades_per_day = self.risk_config.get("max_trades_per_day", 10)
 
         # R:R guardrails
-        self.min_rr = self.filters.get("min_rr_to_take_trade", 3.0)
-        self.max_rr = self.filters.get("max_rr_to_take_trade", 5.0)
+        self.min_rr = self.filters.get("min_rr_to_take_trade", 1.0)
+        self.max_rr = self.filters.get("max_rr_to_take_trade", 10.0)
 
         # Consecutive loss tracking
         self.consecutive_loss_config = self.risk_config.get("consecutive_loss_tracking", {})
         self.consecutive_losses = 0
         self.loss_reduction_active = False
         self.loss_reduction_trades_remaining = 0
-        self.reduced_risk_percent = self.consecutive_loss_config.get("reduction_action", {}).get("reduce_risk_to_percent", 10.0)
+        self.reduced_risk_percent = self.risk_per_trade
         
         # Daily statistics
         self.daily_stats = DailyStats()
@@ -153,7 +155,8 @@ class RiskManager:
         symbol: str,
         sl_pips: float,
         risk_percent: Optional[float] = None,
-        position_index: int = 1
+        position_index: int = 1,
+        side: str = "buy",
     ) -> Dict[str, Any]:
         """
         Calculate position size (lot size) based on risk parameters.
@@ -174,100 +177,142 @@ class RiskManager:
                 'status': 'success' or error message
             }
         """
+        if sl_pips <= 0:
+            return {"lot_size": 0, "risk_amount": 0, "account_balance": 0,
+                    "status": f"Error: Invalid SL pips ({sl_pips})"}
         try:
-            if not self.client:
-                return {
-                    "lot_size": 0,
-                    "risk_amount": 0,
-                    "account_balance": 0,
-                    "status": "Error: MT5 client not available"
-                }
-            
-            # Get account info
-            account_info = self.client.get_account_info()
-            if not account_info:
-                return {
-                    "lot_size": 0,
-                    "risk_amount": 0,
-                    "account_balance": 0,
-                    "status": "Error: Could not retrieve account info"
-                }
-            
-            account_balance = account_info.get("balance", 0)
-            if account_balance <= 0:
-                return {
-                    "lot_size": 0,
-                    "risk_amount": 0,
-                    "account_balance": 0,
-                    "status": "Error: Account balance is zero or negative"
-                }
-            
-            # Determine risk percentage
-            if risk_percent is None:
-                # Check if consecutive loss reduction is active
-                if self.loss_reduction_active:
-                    risk_percent = self.reduced_risk_percent
-                    logger.info(f"  Consecutive losses detected — using reduced risk: {risk_percent}%")
-                else:
-                    risk_percent = self.risk_per_trade
-            
-            # For 2-position entries, split risk equally
-            if position_index == 2:
-                # Second position gets half the risk
-                risk_percent = risk_percent / 2
-            
-            # Calculate risk amount
-            risk_amount = account_balance * (risk_percent / 100.0)
-            
-            # Validate SL pips
-            if sl_pips <= 0:
-                return {
-                    "lot_size": 0,
-                    "risk_amount": 0,
-                    "account_balance": account_balance,
-                    "status": f"Error: Invalid SL pips ({sl_pips})"
-                }
-            
-            # Pip value is typically $10 per pip per standard lot in forex
-            # For other instruments, this might vary
-            pip_value = 10.0  # $ per pip per lot (standard forex)
-            
-            # Calculate lot size
-            lot_size = risk_amount / (sl_pips * pip_value)
-            
-            # Round to valid lot increment (MT5 typically allows 0.01 lot)
-            lot_size = round(lot_size, 2)
-            
-            # Validate lot size
-            if lot_size < 0.01:
-                logger.warning(f"Calculated lot size {lot_size} is too small for {symbol}")
-                lot_size = 0.01
-            
-            logger.info(
-                f"[OK] Lot size calculated for {symbol}:"
-                f"\n    Account: ${account_balance:,.2f}"
-                f"\n    Risk %: {risk_percent}%"
-                f"\n    Risk Amount: ${risk_amount:,.2f}"
-                f"\n    SL Distance: {sl_pips} pips"
-                f"\n    Lot Size: {lot_size} lots"
+            info = self.client.get_symbol_info(symbol)
+            tick = self.client.get_tick(symbol)
+            if not info or not tick:
+                raise RuntimeError(f"Could not retrieve broker price/specifications for {symbol}")
+            point = float(info["point"])
+            pip_size = point * 10 if int(info.get("digits", 0)) in {3, 5} else point
+            entry = float(tick["ask"] if side.lower() in {"buy", "long"} else tick["bid"])
+            stop = entry - sl_pips * pip_size if side.lower() in {"buy", "long"} else entry + sl_pips * pip_size
+            requested_risk = risk_percent
+            if requested_risk is not None and position_index == 2:
+                requested_risk /= 2
+            return self.calculate_position_size(
+                symbol, entry, stop, side=side, risk_percent=requested_risk
             )
-            
+        except Exception as exc:
+            logger.error("calculate_lot_size() failed: %s", exc, exc_info=True)
+            return {"lot_size": 0, "risk_amount": 0, "account_balance": 0,
+                    "status": f"Error: {exc}"}
+
+    def calculate_position_size(
+        self,
+        symbol: str,
+        entry_price: float,
+        stop_loss_price: float,
+        side: str = "buy",
+        risk_percent: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Size using broker profit, volume, stop-distance, slippage, and margin rules."""
+        try:
+            if side.lower() not in {"buy", "sell", "long", "short"}:
+                raise ValueError("side must be buy/long or sell/short")
+            direction = side.lower()
+            is_buy = direction in {"buy", "long"}
+            if entry_price <= 0 or stop_loss_price <= 0:
+                raise ValueError("entry_price and stop_loss_price must be positive")
+            if (is_buy and stop_loss_price >= entry_price) or (
+                not is_buy and stop_loss_price <= entry_price
+            ):
+                raise ValueError("stop loss must be below entry for buys and above entry for sells")
+            info = self.client.get_symbol_info(symbol) if self.client else None
+            account = self.client.get_account_info() if self.client else None
+            if not info or not account:
+                raise RuntimeError("Broker symbol specifications or account information unavailable")
+            balance = float(account.get("balance", 0))
+            free_margin = float(account.get("free_margin", 0))
+            if balance <= 0:
+                raise ValueError("Account balance is zero or negative")
+
+            requested_percent = self.risk_per_trade if risk_percent is None else float(risk_percent)
+            max_risk = float(self.risk_config["max_single_trade_risk_percent"])
+            if requested_percent <= 0:
+                raise ValueError("risk_percent must be positive")
+            effective_percent = min(requested_percent, max_risk)
+            risk_budget = balance * effective_percent / 100
+
+            point = float(info["point"])
+            tick_size = float(info.get("trade_tick_size") or point)
+            tick_value = float(info.get("trade_tick_value_loss") or
+                               info.get("trade_tick_value") or
+                               info.get("trade_tick_value_profit") or 0)
+            if point <= 0 or tick_size <= 0 or tick_value <= 0:
+                raise ValueError(f"Invalid broker tick specification for {symbol}")
+            stops_points = max(float(info.get("min_stop_distance", 0)), 0)
+            broker_min_distance = max(stops_points * point, tick_size)
+            stop_distance = abs(entry_price - stop_loss_price)
+            if stop_distance + 1e-12 < broker_min_distance:
+                raise ValueError(
+                    f"Stop distance {stop_distance:g} is below broker minimum "
+                    f"{broker_min_distance:g} for {symbol}"
+                )
+
+            slip = float(self.filters.get("maximum_slippage_points", 20)) * point
+            stop_with_slippage = stop_loss_price - slip if is_buy else stop_loss_price + slip
+            order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            loss_per_lot = mt5.order_calc_profit(
+                order_type, symbol, 1.0, float(entry_price), float(stop_with_slippage)
+            )
+            if loss_per_lot is None:
+                loss_per_lot = -(
+                    abs(entry_price - stop_with_slippage) / tick_size
+                ) * tick_value
+            loss_per_lot = abs(float(loss_per_lot))
+            commission = float(self.filters.get("commission_per_lot_per_side", {}).get(symbol, 0.0))
+            loss_per_lot += max(0.0, commission) * 2
+            if not math.isfinite(loss_per_lot) or loss_per_lot <= 0:
+                raise ValueError("Could not calculate a finite broker-currency stop loss per lot")
+
+            step = float(info["min_volume_step"])
+            minimum = max(float(info["min_volume"]), float(self.risk_config["min_single_trade_lots"]))
+            maximum = min(float(info["max_volume"]), float(self.risk_config["max_single_trade_lots"]))
+            if step <= 0 or minimum <= 0 or maximum < minimum:
+                raise ValueError(f"Invalid broker volume constraints for {symbol}")
+            raw_volume = min(risk_budget / loss_per_lot, maximum)
+            volume = math.floor((raw_volume + 1e-12) / step) * step
+            volume = round(volume, 8)
+            if volume + 1e-12 < minimum:
+                return {
+                    "lot_size": 0.0, "risk_amount": 0.0, "risk_budget": risk_budget,
+                    "account_balance": balance, "risk_percent": effective_percent,
+                    "status": "rejected: minimum broker volume would exceed the per-trade risk cap",
+                }
+
+            margin_per_lot = mt5.order_calc_margin(order_type, symbol, 1.0, float(entry_price))
+            if margin_per_lot is None or float(margin_per_lot) <= 0:
+                raise RuntimeError(f"Broker margin calculation failed for {symbol}: {mt5.last_error()}")
+            margin_volume = math.floor((free_margin / float(margin_per_lot) + 1e-12) / step) * step
+            volume = min(volume, round(margin_volume, 8))
+            volume = math.floor((volume + 1e-12) / step) * step
+            volume = round(volume, 8)
+            if volume + 1e-12 < minimum:
+                return {
+                    "lot_size": 0.0, "risk_amount": 0.0, "risk_budget": risk_budget,
+                    "account_balance": balance, "risk_percent": effective_percent,
+                    "status": "rejected: minimum broker volume exceeds available free margin",
+                }
+            actual_risk = loss_per_lot * volume
+            margin_required = float(margin_per_lot) * volume
+            if actual_risk > risk_budget + 0.01:
+                raise ArithmeticError("Rounded position exceeds the configured per-trade risk cap")
             return {
-                "lot_size": lot_size,
-                "risk_amount": round(risk_amount, 2),
-                "account_balance": account_balance,
-                "risk_percent": risk_percent,
-                "status": "success"
+                "lot_size": volume, "risk_amount": round(actual_risk, 2),
+                "risk_budget": round(risk_budget, 2), "account_balance": balance,
+                "risk_percent": effective_percent, "loss_per_lot": round(loss_per_lot, 4),
+                "margin_required": round(margin_required, 2), "free_margin": free_margin,
+                "volume_step": step, "minimum_volume": minimum, "maximum_volume": maximum,
+                "slippage_allowance_points": self.filters.get("maximum_slippage_points", 20),
+                "status": "success",
             }
-            
-        except Exception as e:
-            logger.error(f"calculate_lot_size() error: {str(e)}", exc_info=True)
-            return {
-                "lot_size": 0,
-                "risk_amount": 0,
-                "account_balance": 0,
-                "status": f"Error: {str(e)}"
-            }
+        except Exception as exc:
+            logger.error("calculate_position_size() failed: %s", exc, exc_info=True)
+            return {"lot_size": 0, "risk_amount": 0, "account_balance": 0,
+                    "status": f"Error: {exc}"}
     
     def validate_rr(
         self,
@@ -327,10 +372,9 @@ class RiskManager:
             elif rr_ratio > self.max_rr:
                 return {
                     "rr_ratio": round(rr_ratio, 2),
-                    "valid": True,
+                    "valid": False,
                     "message": f"R:R {rr_ratio:.2f} exceeds maximum {self.max_rr}",
-                    "recommendation": f"CAP TP at 1:{self.max_rr} ratio. Risk still acceptable but overreaching.",
-                    "capped_rr": self.max_rr,
+                    "recommendation": "Reject this target or select a nearer valid structural target; do not move the stop.",
                     "sl_pips": round(sl_pips, 1),
                     "tp_pips": round(tp_pips, 1)
                 }
@@ -509,17 +553,45 @@ class RiskManager:
                     "message": "Could not retrieve account info"
                 }
             
-            balance = account_info.get("balance", 0)
-            equity = account_info.get("equity", 0)
-            
-            # Calculate daily P&L
-            daily_pnl = equity - balance
-            daily_pnl_percent = (daily_pnl / balance * 100) if balance > 0 else 0
-            
-            # Check against limit
-            can_trade = abs(daily_pnl_percent) <= self.max_daily_risk
+            balance = float(account_info.get("balance", 0))
+            today = datetime.now(timezone.utc).date()
+            deals = self.client.get_order_history(days=1)
+            if deals is None:
+                raise RuntimeError("Could not load today's closed deals for daily-loss check")
+            realized_today = 0.0
+            for deal in deals:
+                deal_time = deal.get("time")
+                if deal_time is None:
+                    continue
+                if deal_time.tzinfo is None:
+                    deal_time = deal_time.replace(tzinfo=timezone.utc)
+                if deal_time.astimezone(timezone.utc).date() == today:
+                    realized_today += sum(
+                        float(deal.get(field, 0.0))
+                        for field in ("profit", "commission", "swap", "fee")
+                    )
+            positions = self.client.get_open_positions()
+            if positions is None:
+                raise RuntimeError("Could not load open positions for daily-loss check")
+            unrealized_today = sum(
+                float(position.get("profit", 0.0))
+                + float(position.get("swap", 0.0))
+                + float(position.get("commission", 0.0))
+                for position in positions
+            )
+            daily_pnl = realized_today + unrealized_today
+            day_start_balance = balance - realized_today
+            daily_pnl_percent = (daily_pnl / day_start_balance * 100) if day_start_balance > 0 else 0
+
+            threshold = int(self.consecutive_loss_config.get("consecutive_losses_threshold", 2))
+            consecutive_halt = (
+                self.daily_stats.date == today.isoformat()
+                and self.daily_stats.consecutive_losses >= threshold
+            )
+            can_trade = daily_pnl_percent > -self.max_daily_risk and not consecutive_halt
             
             # Update daily stats
+            self.daily_stats.date = today.isoformat()
             self.daily_stats.daily_pnl = daily_pnl
             self.daily_stats.daily_pnl_percent = daily_pnl_percent
             
@@ -540,7 +612,14 @@ class RiskManager:
                 "daily_pnl_percent": round(daily_pnl_percent, 2),
                 "max_daily_risk": self.max_daily_risk,
                 "can_trade": can_trade,
-                "message": "Daily limit OK" if can_trade else f"Daily loss limit hit: {abs(daily_pnl_percent):.2f}% vs {self.max_daily_risk}%"
+                "consecutive_loss_halt": consecutive_halt,
+                "day_start_balance": round(day_start_balance, 2),
+                "message": (
+                    "Daily limit OK" if can_trade
+                    else "Two consecutive losses: trading halted until next UTC day"
+                    if consecutive_halt
+                    else f"Daily loss limit hit: {abs(daily_pnl_percent):.2f}% vs {self.max_daily_risk}%"
+                )
             }
         
         except Exception as e:
@@ -624,6 +703,12 @@ class RiskManager:
             }
         """
         try:
+            today = datetime.now(timezone.utc).date().isoformat()
+            if self.daily_stats.date != today:
+                self.daily_stats = DailyStats(date=today)
+                self.consecutive_losses = 0
+                self.loss_reduction_active = False
+                self.loss_reduction_trades_remaining = 0
             if pnl < 0:
                 self.consecutive_losses += 1
                 self.daily_stats.consecutive_wins = 0
@@ -645,33 +730,26 @@ class RiskManager:
             threshold = self.consecutive_loss_config.get("consecutive_losses_threshold", 2)
             if self.consecutive_losses >= threshold and not self.loss_reduction_active:
                 self.loss_reduction_active = True
-                self.loss_reduction_trades_remaining = self.consecutive_loss_config.get("reduction_action", {}).get("apply_for_next_n_trades", 3)
+                self.loss_reduction_trades_remaining = 0
                 
                 logger.error(
                     f"[WARNING] CONSECUTIVE LOSS THRESHOLD HIT ({self.consecutive_losses} losses)"
-                    f"\n    Activating position reduction: {self.risk_per_trade}% → {self.reduced_risk_percent}%"
-                    f"\n    Duration: next {self.loss_reduction_trades_remaining} trades"
+                    "\n    New entries are halted until the next UTC day"
                 )
                 
                 return {
                     "consecutive_losses": self.consecutive_losses,
                     "loss_reduction_active": True,
-                    "reduced_risk_percent": self.reduced_risk_percent,
-                    "duration_trades": self.loss_reduction_trades_remaining,
-                    "message": f"Position reduction ACTIVATED for next {self.loss_reduction_trades_remaining} trades"
+                    "reduced_risk_percent": self.risk_per_trade,
+                    "trading_halted": True,
+                    "message": "Trading halted until the next UTC day"
                 }
-            
-            # Decrement reduction countdown
-            if self.loss_reduction_active and self.loss_reduction_trades_remaining > 0:
-                self.loss_reduction_trades_remaining -= 1
-                if self.loss_reduction_trades_remaining == 0:
-                    self.loss_reduction_active = False
-                    logger.info("Position reduction period ENDED — returning to normal risk")
             
             return {
                 "consecutive_losses": self.consecutive_losses,
                 "loss_reduction_active": self.loss_reduction_active,
-                "reduced_risk_percent": self.reduced_risk_percent if self.loss_reduction_active else self.risk_per_trade,
+                "trading_halted": self.loss_reduction_active,
+                "reduced_risk_percent": self.risk_per_trade,
                 "message": "Trade recorded"
             }
         

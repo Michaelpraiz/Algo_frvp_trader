@@ -16,6 +16,9 @@ dependencies = [
     "requests>=2.31.0",
 ]
 
+[project.scripts]
+mt5-backtest = "mt5_mcp.backtesting:main"
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

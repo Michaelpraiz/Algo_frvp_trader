@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 # Import tools
 from .strategy_config import STRATEGY_NAME as STRATEGY_SYSTEM_PROMPT
-from .tools import account_tools, market_tools, order_tools, analysis_tools, news_filter, frvp_tools
+from .tools import (
+    account_tools, market_tools, order_tools, analysis_tools, news_filter,
+    frvp_tools, backtest_tools,
+)
 
 # Map method names to callables
 TOOL_MAP = {
@@ -59,6 +62,14 @@ TOOL_MAP = {
     # FRVP
     'compute_fixed_range_volume_profile': frvp_tools.compute_fixed_range_volume_profile,
     'get_extended_frvp_levels': frvp_tools.get_extended_frvp_levels,
+    # backtesting and optimizer approval gate
+    'run_backtest': backtest_tools.run_backtest,
+    'optimize_backtest': backtest_tools.optimize_backtest,
+    'list_optimizer_proposals': backtest_tools.list_optimizer_proposals,
+    'approve_optimizer_proposal': backtest_tools.approve_optimizer_proposal,
+    'reject_optimizer_proposal': backtest_tools.reject_optimizer_proposal,
+    'import_live_trade_log': backtest_tools.import_live_trade_log,
+    'export_backtest_review_bundle': backtest_tools.export_backtest_review_bundle,
     # news
     'get_upcoming_news': news_filter.get_upcoming_news,
     'is_safe_to_trade': news_filter.is_safe_to_trade,

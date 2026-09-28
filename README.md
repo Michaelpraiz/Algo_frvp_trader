@@ -35,6 +35,38 @@ With `PYTHONPATH=src` configured:
 .\venv\Scripts\python.exe -m pytest -q
 ```
 
+## Backtesting and Optimization
+
+Run a two-year MT5 history backtest (the default range), or point it at an OHLCV
+CSV with `time,open,high,low,close` and optional `volume`/`tick_volume` columns:
+
+```powershell
+$env:PYTHONPATH = "src"
+.\venv\Scripts\python.exe -m mt5_mcp.backtesting --symbol GOLD# --timeframe M15
+.\venv\Scripts\python.exe -m mt5_mcp.backtesting --symbol GOLD# --timeframe M15 --csv .\data\gold_m15.csv
+.\venv\Scripts\python.exe -m mt5_mcp.backtesting --symbol GOLD# --timeframe M15 --optimize --folds 3
+```
+
+Alternatively, install the project in editable mode once to use the `mt5-backtest`
+console command without setting `PYTHONPATH`:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -e .
+mt5-backtest --symbol GOLD# --timeframe M15
+```
+
+The MCP server also exposes `run_backtest`, `optimize_backtest`,
+`list_optimizer_proposals`, `approve_optimizer_proposal`, `reject_optimizer_proposal`,
+`import_live_trade_log`, and `export_backtest_review_bundle`. Backtest runs, setup
+features/labels, trade outcomes, optimizer evaluations, and human decisions are stored
+locally in `data/backtest_logs.sqlite3` (ignored by Git). Optimizer results are proposals;
+approval records an explicit human decision and **does not edit live strategy settings**.
+Export a review bundle periodically for qualitative LLM review or later supervised-model
+experiments. No LLM is invoked automatically.
+
+See [docs/backtesting.md](docs/backtesting.md) for the modeled rules, parameters,
+limitations, MCP examples, and log schema.
+
 The server entry point is:
 
 ```text

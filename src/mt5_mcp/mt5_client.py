@@ -12,7 +12,7 @@ import sys
 import logging
 import time
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import MetaTrader5 as mt5
 import pandas as pd
 
@@ -231,14 +231,25 @@ class MT5Client:
                 "bid": sym_info.bid,
                 "ask": sym_info.ask,
                 "last": sym_info.last,
-                "bid_volume": sym_info.bid_volume,
-                "ask_volume": sym_info.ask_volume,
+                "bid_volume": getattr(sym_info, "bid_volume", 0.0),
+                "ask_volume": getattr(sym_info, "ask_volume", 0.0),
                 "min_volume": sym_info.volume_min,
                 "max_volume": sym_info.volume_max,
                 "min_volume_step": sym_info.volume_step,
                 "min_stop_distance": sym_info.trade_stops_level,
                 "spread": sym_info.spread,
-                "spread_points": sym_info.spread_raw,
+                "spread_points": getattr(sym_info, "spread_raw", sym_info.spread),
+                "trade_tick_size": getattr(sym_info, "trade_tick_size", sym_info.point),
+                "trade_tick_value": getattr(sym_info, "trade_tick_value", 0.0),
+                "trade_tick_value_loss": getattr(sym_info, "trade_tick_value_loss", 0.0),
+                "trade_tick_value_profit": getattr(sym_info, "trade_tick_value_profit", 0.0),
+                "currency_profit": getattr(sym_info, "currency_profit", ""),
+                "trade_stops_level": getattr(sym_info, "trade_stops_level", 0),
+                "trade_freeze_level": getattr(sym_info, "trade_freeze_level", 0),
+                "volume_min": getattr(sym_info, "volume_min", 0.0),
+                "volume_max": getattr(sym_info, "volume_max", 0.0),
+                "volume_step": getattr(sym_info, "volume_step", 0.0),
+                "trade_contract_size": getattr(sym_info, "trade_contract_size", 0.0),
             }
             
             logger.debug(f"✓ Symbol info retrieved: {symbol} @ {info['bid']}/{info['ask']}")
@@ -306,6 +317,37 @@ class MT5Client:
         except Exception as e:
             logger.error(f"get_candles({symbol}, {timeframe_str}) error: {str(e)}", exc_info=True)
             return None
+
+    def get_candles_range(
+        self, symbol: str, timeframe_str: str, start: datetime, end: datetime
+    ) -> Optional[pd.DataFrame]:
+        """Retrieve historical OHLCV bars for a bounded UTC interval."""
+        timeframe_map = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+            "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
+            "MN1": mt5.TIMEFRAME_MN1,
+        }
+        if timeframe_str not in timeframe_map:
+            raise ValueError(f"Invalid timeframe: {timeframe_str}")
+        if start >= end:
+            raise ValueError("start must be earlier than end")
+        if not self.health_check():
+            raise ConnectionError("Cannot retrieve historical candles: MT5 connection is unhealthy")
+        rates = mt5.copy_rates_range(symbol, timeframe_map[timeframe_str], start, end)
+        if rates is None:
+            raise RuntimeError(f"MT5 candle-range request failed: {mt5.last_error()}")
+        if len(rates) == 0:
+            return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
+        data = pd.DataFrame(rates)
+        data["time"] = pd.to_datetime(data["time"], unit="s", utc=True)
+        data.rename(columns={"tick_volume": "volume"}, inplace=True)
+        columns = ["time", "open", "high", "low", "close", "volume"]
+        if "spread" in data:
+            data.rename(columns={"spread": "spread_points"}, inplace=True)
+            columns.append("spread_points")
+        return data[columns]
     
     def get_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
@@ -376,6 +418,8 @@ class MT5Client:
                     "open_price": pos.price_open,
                     "current_price": pos.price_current,
                     "profit": pos.profit,
+                    "swap": getattr(pos, "swap", 0.0),
+                    "commission": getattr(pos, "commission", 0.0),
                     "profit_pips": round((pos.price_current - pos.price_open) / 
                                        mt5.symbol_info(pos.symbol).point),
                     "open_time": datetime.fromtimestamp(pos.time),
@@ -426,8 +470,10 @@ class MT5Client:
                     "price": deal.price,
                     "commission": deal.commission,
                     "profit": deal.profit,
-                    "time": datetime.fromtimestamp(deal.time),
+                    "time": datetime.fromtimestamp(deal.time, tz=timezone.utc),
                     "comment": deal.comment,
+                    "swap": getattr(deal, "swap", 0.0),
+                    "fee": getattr(deal, "fee", 0.0),
                 })
             
             logger.debug(f"✓ Retrieved {len(result)} deals from last {days} days")
